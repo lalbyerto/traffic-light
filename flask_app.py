@@ -1,18 +1,18 @@
 """Traffic Light API - DevRev SE challenge (Part 3).
 
-One file, Flask only (pre-installed on PythonAnywhere):
-- REST API secured with an API key (header: X-API-Key)
+One file, Flask only, served by Gunicorn on Render:
+- REST API secured with an API key (header: X-API-Key), fail closed, constant-time check
 - API explorer: Swagger UI at /docs
 - Live updates + live request debugger: the page polls /state every second
 """
-import json
+import hmac
 import os
 from datetime import datetime, timezone
 from functools import wraps
 
 from flask import Flask, jsonify, request
 
-API_KEY = os.environ.get("API_KEY", "change-me")  # set in the PythonAnywhere WSGI file, not here
+API_KEY = os.environ.get("API_KEY", "")  # set as an environment variable on Render, never in the code
 COLORS = ["red", "amber", "green"]
 
 app = Flask(__name__)
@@ -24,7 +24,10 @@ logs = []  # recent API calls shown in the live debugger
 def require_key(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
-        if request.headers.get("X-API-Key") != API_KEY:
+        if not API_KEY:  # fail closed: no key configured on the server = nobody gets in
+            return jsonify(error="Server not configured: API key missing"), 503
+        given = request.headers.get("X-API-Key", "")
+        if not hmac.compare_digest(given.encode(), API_KEY.encode()):  # constant-time comparison
             return jsonify(error="Invalid or missing API key"), 401
         return f(*args, **kwargs)
     return wrapper
@@ -34,10 +37,11 @@ def require_key(f):
 @app.after_request
 def log_api_call(response):
     if request.path.startswith("/api"):
-        headers = {k: v for k, v in request.headers.items()
-                   if k.lower() != "cookie" and not k.lower().startswith("x-forwarded")}
-        if "X-Api-Key" in headers:  # never show the secret on screen
-            headers["X-Api-Key"] = "****" + headers["X-Api-Key"][-2:]
+        # show only meaningful headers: hides hosting/CDN noise and the caller's IP address
+        shown = ("host", "user-agent", "content-type", "content-length", "accept", "x-api-key")
+        headers = {k: v for k, v in request.headers.items() if k.lower() in shown}
+        if "X-Api-Key" in headers:  # never show the secret on screen, not even part of it
+            headers["X-Api-Key"] = "********"
         logs.append({
             "id": (logs[-1]["id"] + 1) if logs else 1,
             "time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
@@ -92,7 +96,8 @@ OPENAPI = {
     "paths": {
         "/api/light": {
             "get": {"summary": "Get current status", "responses": {"200": {"description": "Current color"},
-                                                                    "401": {"description": "Missing/invalid key"}}},
+                                                                    "401": {"description": "Missing/invalid key"},
+                                                                    "503": {"description": "API key not configured on the server"}}},
             "put": {"summary": "Set light color",
                     "requestBody": {"required": True, "content": {"application/json": {"schema": {
                         "type": "object", "required": ["color"],
@@ -116,9 +121,12 @@ def openapi():
 @app.get("/docs")
 def docs():
     return """<!doctype html><html><head><meta charset="utf-8"><title>Traffic Light API</title>
-<link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui.css"></head>
+<!-- SRI: the browser runs these files only if their fingerprint matches, so a tampered CDN file is blocked -->
+<link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui.css"
+      integrity="sha384-wxLW6kwyHktdDGr6Pv1zgm/VGJh99lfUbzSn6HNHBENZlCN7W602k9VkGdxuFvPn" crossorigin="anonymous"></head>
 <body><div id="ui"></div>
-<script src="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui-bundle.js"></script>
+<script src="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui-bundle.js"
+        integrity="sha384-wmyclcVGX/WhUkdkATwhaK1X1JtiNrr2EoYJ+diV3vj4v6OC5yCeSu+yW13SYJep" crossorigin="anonymous"></script>
 <script>SwaggerUIBundle({url: "/openapi.json", dom_id: "#ui"});</script></body></html>"""
 
 
