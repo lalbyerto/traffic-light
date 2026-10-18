@@ -1,7 +1,7 @@
 """Traffic Light API - DevRev SE challenge (Part 3).
 
 One file, Flask only, served by Gunicorn on Render:
-- REST API secured with API keys (header: X-API-Key), one key per client, fail closed, constant-time check
+- REST API secured with API keys (header X-API-Key, or Authorization: Bearer), one key per client, fail closed, constant-time check
 - API explorer: Swagger UI at /docs
 - Live updates + live request debugger: the page polls /state every second
 """
@@ -33,7 +33,11 @@ def require_key(f):
         if not CLIENT_KEYS:  # fail closed: no key configured on the server = nobody gets in
             g.caller = "Unknown"
             return jsonify(error="Server not configured: API key missing"), 503
-        given = request.headers.get("X-API-Key", "").encode()
+        # the key can arrive as "X-API-Key: <key>" (browser/Swagger) or "Authorization: Bearer <key>"
+        # (DevRev HTTP node with the key stored in a DevRev connection, so it never appears in the workflow)
+        auth = request.headers.get("Authorization", "")
+        bearer = auth[7:] if auth.lower().startswith("bearer ") else ""
+        given = (request.headers.get("X-API-Key") or bearer).encode()
         caller = None
         for name, key in CLIENT_KEYS.items():  # check every key, constant-time comparison each
             if hmac.compare_digest(given, key.encode()):
@@ -51,10 +55,12 @@ def require_key(f):
 def log_api_call(response):
     if request.path.startswith("/api"):
         # show only meaningful headers: hides hosting/CDN noise and the caller's IP address
-        shown = ("host", "user-agent", "content-type", "content-length", "accept", "x-api-key")
+        shown = ("host", "user-agent", "content-type", "content-length", "accept", "x-api-key", "authorization")
         headers = {k: v for k, v in request.headers.items() if k.lower() in shown}
         if "X-Api-Key" in headers:  # never show the secret on screen, not even part of it
             headers["X-Api-Key"] = "********"
+        if "Authorization" in headers:
+            headers["Authorization"] = headers["Authorization"].split(" ")[0] + " ********"
         logs.append({
             "id": (logs[-1]["id"] + 1) if logs else 1,
             "time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
@@ -218,7 +224,7 @@ function addLog(e){
 }
 async function poll(){
   try {
-    const r = await (await fetch("/state?since=" + last)).json()
+    const r = await (await fetch("/state?since=" + last)).json();
     show(r.color);
     r.logs.forEach(e => { addLog(e); last = e.id; });
     $("conn").classList.add("live");
