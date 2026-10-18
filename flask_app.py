@@ -218,7 +218,7 @@ function addLog(e){
 }
 async function poll(){
   try {
-    const r = await (await fetch("/state?since=" + last)).json();
+    const r = await (await fetch("/state?since=" + last)).json()
     show(r.color);
     r.logs.forEach(e => { addLog(e); last = e.id; });
     $("conn").classList.add("live");
