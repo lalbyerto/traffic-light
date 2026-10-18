@@ -1,7 +1,7 @@
 """Traffic Light API - DevRev SE challenge (Part 3).
 
 One file, Flask only, served by Gunicorn on Render:
-- REST API secured with an API key (header: X-API-Key), fail closed, constant-time check
+- REST API secured with API keys (header: X-API-Key), one key per client, fail closed, constant-time check
 - API explorer: Swagger UI at /docs
 - Live updates + live request debugger: the page polls /state every second
 """
@@ -10,9 +10,15 @@ import os
 from datetime import datetime, timezone
 from functools import wraps
 
-from flask import Flask, jsonify, request
+from flask import Flask, g, jsonify, request
 
-API_KEY = os.environ.get("API_KEY", "")  # set as an environment variable on Render, never in the code
+# One key per client, so the debugger can show who made each call and each key can be revoked on its own.
+# Values are environment variables on Render, never in the code.
+CLIENT_KEYS = {
+    "DevRev agent": os.environ.get("API_KEY_DEVREV", ""),
+    "Browser (human)": os.environ.get("API_KEY_BROWSER", ""),
+}
+CLIENT_KEYS = {name: key for name, key in CLIENT_KEYS.items() if key}  # ignore clients with no key set
 COLORS = ["red", "amber", "green"]
 
 app = Flask(__name__)
@@ -24,11 +30,18 @@ logs = []  # recent API calls shown in the live debugger
 def require_key(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
-        if not API_KEY:  # fail closed: no key configured on the server = nobody gets in
+        if not CLIENT_KEYS:  # fail closed: no key configured on the server = nobody gets in
+            g.caller = "Unknown"
             return jsonify(error="Server not configured: API key missing"), 503
-        given = request.headers.get("X-API-Key", "")
-        if not hmac.compare_digest(given.encode(), API_KEY.encode()):  # constant-time comparison
+        given = request.headers.get("X-API-Key", "").encode()
+        caller = None
+        for name, key in CLIENT_KEYS.items():  # check every key, constant-time comparison each
+            if hmac.compare_digest(given, key.encode()):
+                caller = name
+        if caller is None:
+            g.caller = "Unknown (rejected)"
             return jsonify(error="Invalid or missing API key"), 401
+        g.caller = caller
         return f(*args, **kwargs)
     return wrapper
 
@@ -45,6 +58,7 @@ def log_api_call(response):
         logs.append({
             "id": (logs[-1]["id"] + 1) if logs else 1,
             "time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+            "caller": g.get("caller", "Unknown"),
             "method": request.method,
             "path": request.path,
             "status": response.status_code,
@@ -90,7 +104,7 @@ def page_state():
 OPENAPI = {
     "openapi": "3.0.3",
     "info": {"title": "Traffic Light API", "version": "1.0.0",
-             "description": "Click **Authorize** and paste the API key."},
+             "description": "Click **Authorize** and paste the browser API key. Each client (browser, DevRev agent) has its own key, shown as *caller* in the live debugger."},
     "components": {"securitySchemes": {"ApiKey": {"type": "apiKey", "in": "header", "name": "X-API-Key"}}},
     "security": [{"ApiKey": []}],
     "paths": {
@@ -168,6 +182,8 @@ PAGE = """<!doctype html>
   .ok{background:#163d26;color:#7ee2a3}.ko{background:#4a1a1a;color:#ff9b9b}
   pre{white-space:pre-wrap;word-break:break-all;color:var(--muted);margin:8px 0 0}
   .empty{color:var(--muted)}
+  .who{padding:1px 8px;border-radius:6px;font-size:12px;background:#2b3240;color:var(--muted)}
+  .who.devrev{background:#3b2a5c;color:#d4bfff}.who.browser{background:#1f3550;color:#9cc8ff}
 </style></head><body>
 <header><h1>&#128678; Traffic Light</h1><a href="/docs" target="_blank">API explorer &#8599;</a></header>
 <main>
@@ -187,10 +203,12 @@ let last = 0, n = 0;
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 function show(c){ ["red","amber","green"].forEach(x => $(x).classList.toggle("on", x === c)); $("cur").textContent = c; }
+const who = c => c.startsWith("DevRev") ? "devrev" : c.startsWith("Browser") ? "browser" : "";
 function addLog(e){
   $("none")?.remove();
   const d = document.createElement("details"); d.className = "entry";
   d.innerHTML = `<summary><span class="m">${e.method}</span><span>${esc(e.path)}</span>
+    <span class="who ${who(e.caller)}">${esc(e.caller)}</span>
     <span class="s ${e.status < 400 ? "ok" : "ko"}">${e.status}</span><span class="empty">${e.time}</span></summary>
     <pre><b>Headers</b>\\n${esc(JSON.stringify(e.headers, null, 2))}</pre>
     <pre><b>Payload</b>\\n${esc(e.payload || "(empty)")}</pre>
